@@ -91,6 +91,12 @@ class QuizGradeRequest(BaseModel):
     answer: Optional[str] = None
     selected_index: Optional[int] = None
 
+class FlashcardGenerateRequest(BaseModel):
+    workspace_id: int
+
+class SummaryGenerateRequest(BaseModel):
+    workspace_id: int
+
 
 @app.post("/register")
 def register(req: RegisterRequest):
@@ -297,11 +303,11 @@ def chat_history(workspace_id: int, user=Depends(get_current_user)):
 
 @app.post("/quiz/generate")
 def quiz_generate(req: QuizGenerateRequest, user=Depends(get_current_user)):
-    results = search_chunks("", req.workspace_id, k=50)
-    if not results:
+    chunks_objs = get_all_chunks(req.workspace_id)
+    if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
 
-    chunks = [c for c, _ in results]
+    chunks = [c.text for c in chunks_objs]
 
     if req.mode == "mcq":
         questions = generate_mcq_questions(client, LLM_MODEL, chunks, req.num_questions)
@@ -347,9 +353,6 @@ def health():
     return {"status": "ok"}
 
 
-class FlashcardGenerateRequest(BaseModel):
-    workspace_id: int
-
 @app.post("/flashcards/generate")
 def generate_flashcards(req: FlashcardGenerateRequest, user=Depends(get_current_user)):
     chunks_objs = get_all_chunks(req.workspace_id)
@@ -383,6 +386,10 @@ Text:
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM flashcards WHERE workspace_id = %s",
+                (req.workspace_id,)
+            )
             for card in flashcards:
                 cur.execute(
                     "INSERT INTO flashcards (workspace_id, front, back) VALUES (%s, %s, %s)",
@@ -404,8 +411,23 @@ def get_flashcards(workspace_id: int, user=Depends(get_current_user)):
     return {"flashcards": [{"id": r[0], "front": r[1], "back": r[2]} for r in rows]}
 
 
-class SummaryGenerateRequest(BaseModel):
-    workspace_id: int
+@app.delete("/flashcards/{flashcard_id}")
+def delete_flashcard(flashcard_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.id FROM flashcards f
+                JOIN workspace_members wm ON wm.workspace_id = f.workspace_id
+                WHERE f.id = %s AND wm.user_id = %s
+                """,
+                (flashcard_id, user["user_id"])
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Flashcard not found")
+            cur.execute("DELETE FROM flashcards WHERE id = %s", (flashcard_id,))
+    return {"message": "Flashcard deleted"}
+
 
 @app.post("/summaries/generate")
 def generate_summary(req: SummaryGenerateRequest, user=Depends(get_current_user)):
@@ -433,6 +455,10 @@ Respond with a clean, well-structured summary. Use headings and bullet points.""
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM summaries WHERE workspace_id = %s",
+                (req.workspace_id,)
+            )
             cur.execute(
                 "INSERT INTO summaries (workspace_id, content) VALUES (%s, %s) RETURNING id",
                 (req.workspace_id, summary_text)
