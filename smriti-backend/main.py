@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 from typing import List, Optional
 
@@ -178,6 +179,63 @@ def list_documents(workspace_id: int, user=Depends(get_current_user)):
     return {"documents": [{"id": r[0], "filename": r[1], "uploaded_at": r[2]} for r in rows]}
 
 
+@app.delete("/documents/clear")
+def clear_documents(workspace_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+                (workspace_id, user["user_id"])
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=403, detail="Access denied")
+            cur.execute(
+                "DELETE FROM document_chunks WHERE workspace_id = %s",
+                (workspace_id,)
+            )
+            cur.execute(
+                "DELETE FROM documents WHERE workspace_id = %s",
+                (workspace_id,)
+            )
+    return {"message": "All documents cleared"}
+
+
+@app.delete("/documents/{document_id}")
+def delete_document(document_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT d.id FROM documents d
+                JOIN workspace_members wm ON wm.workspace_id = d.workspace_id
+                WHERE d.id = %s AND wm.user_id = %s
+                """,
+                (document_id, user["user_id"])
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Document not found")
+            cur.execute("DELETE FROM document_chunks WHERE document_id = %s", (document_id,))
+            cur.execute("DELETE FROM documents WHERE id = %s", (document_id,))
+    return {"message": "Document deleted"}
+
+
+@app.delete("/chat/history")
+def clear_chat_history(workspace_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+                (workspace_id, user["user_id"])
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=403, detail="Access denied")
+            cur.execute(
+                "DELETE FROM chat_messages WHERE workspace_id = %s",
+                (workspace_id,)
+            )
+    return {"message": "Chat history cleared"}
+
+
 @app.post("/chat")
 def chat(req: ChatRequest, user=Depends(get_current_user)):
     results = search_chunks(req.question, req.workspace_id)
@@ -254,7 +312,7 @@ def quiz_generate(req: QuizGenerateRequest, user=Depends(get_current_user)):
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO quiz_sessions (workspace_id, mode, questions) VALUES (%s, %s, %s) RETURNING id",
-                (req.workspace_id, req.mode, __import__('json').dumps(questions))
+                (req.workspace_id, req.mode, json.dumps(questions))
             )
             session_id = cur.fetchone()[0]
 
