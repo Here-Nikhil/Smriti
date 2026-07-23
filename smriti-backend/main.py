@@ -347,6 +347,114 @@ def health():
     return {"status": "ok"}
 
 
+class FlashcardGenerateRequest(BaseModel):
+    workspace_id: int
+
+@app.post("/flashcards/generate")
+def generate_flashcards(req: FlashcardGenerateRequest, user=Depends(get_current_user)):
+    results = search_chunks("", req.workspace_id, k=50)
+    if not results:
+        raise HTTPException(status_code=400, detail="No documents found in this workspace")
+
+    chunks = [c for c, _ in results]
+    combined_text = "\n\n".join(chunks[:20])
+
+    prompt = f"""You are a study assistant. Based on the following text, generate 10 flashcards.
+Each flashcard should have a concise question on the front and a clear answer on the back.
+Respond ONLY with a JSON array, no markdown, no preamble. Format:
+[{{"front": "question here", "back": "answer here"}}, ...]
+
+Text:
+{combined_text}"""
+
+    response = client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
+    try:
+        flashcards = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to parse flashcards from LLM response")
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            for card in flashcards:
+                cur.execute(
+                    "INSERT INTO flashcards (workspace_id, front, back) VALUES (%s, %s, %s)",
+                    (req.workspace_id, card["front"], card["back"])
+                )
+
+    return {"flashcards": flashcards}
+
+
+@app.get("/flashcards")
+def get_flashcards(workspace_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, front, back FROM flashcards WHERE workspace_id = %s ORDER BY id",
+                (workspace_id,)
+            )
+            rows = cur.fetchall()
+    return {"flashcards": [{"id": r[0], "front": r[1], "back": r[2]} for r in rows]}
+
+
+class SummaryGenerateRequest(BaseModel):
+    workspace_id: int
+
+@app.post("/summaries/generate")
+def generate_summary(req: SummaryGenerateRequest, user=Depends(get_current_user)):
+    results = search_chunks("", req.workspace_id, k=50)
+    if not results:
+        raise HTTPException(status_code=400, detail="No documents found in this workspace")
+
+    chunks = [c for c, _ in results]
+    combined_text = "\n\n".join(chunks[:30])
+
+    prompt = f"""You are a study assistant. Summarize the following document content into clear, concise bullet points grouped by topic. Make it easy to review before an exam.
+
+Text:
+{combined_text}
+
+Respond with a clean, well-structured summary. Use headings and bullet points."""
+
+    response = client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+
+    summary_text = response.choices[0].message.content.strip()
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO summaries (workspace_id, content) VALUES (%s, %s) RETURNING id",
+                (req.workspace_id, summary_text)
+            )
+
+    return {"summary": summary_text}
+
+
+@app.get("/summaries")
+def get_summaries(workspace_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, content, created_at FROM summaries WHERE workspace_id = %s ORDER BY created_at DESC LIMIT 1",
+                (workspace_id,)
+            )
+            row = cur.fetchone()
+    if not row:
+        return {"summary": None}
+    return {"summary": {"id": row[0], "content": row[1], "created_at": row[2]}}
+
+
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...), user=Depends(get_current_user)):
     audio_bytes = await file.read()
