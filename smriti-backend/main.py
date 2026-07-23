@@ -352,11 +352,11 @@ class FlashcardGenerateRequest(BaseModel):
 
 @app.post("/flashcards/generate")
 def generate_flashcards(req: FlashcardGenerateRequest, user=Depends(get_current_user)):
-    results = search_chunks("", req.workspace_id, k=50)
-    if not results:
+    chunks_objs = get_all_chunks(req.workspace_id)
+    if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
 
-    chunks = [c for c, _ in results]
+    chunks = [c.text for c in chunks_objs]
     combined_text = "\n\n".join(chunks[:20])
 
     prompt = f"""You are a study assistant. Based on the following text, generate 10 flashcards.
@@ -409,11 +409,11 @@ class SummaryGenerateRequest(BaseModel):
 
 @app.post("/summaries/generate")
 def generate_summary(req: SummaryGenerateRequest, user=Depends(get_current_user)):
-    results = search_chunks("", req.workspace_id, k=50)
-    if not results:
+    chunks_objs = get_all_chunks(req.workspace_id)
+    if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
 
-    chunks = [c for c, _ in results]
+    chunks = [c.text for c in chunks_objs]
     combined_text = "\n\n".join(chunks[:30])
 
     prompt = f"""You are a study assistant. Summarize the following document content into clear, concise bullet points grouped by topic. Make it easy to review before an exam.
