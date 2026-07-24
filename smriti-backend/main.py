@@ -158,6 +158,14 @@ def upload_documents(workspace_id: int, files: List[UploadFile] = File(...), use
         with open(tmp_path, "wb") as out:
             out.write(f.file.read())
 
+        chunks = build_chunks_from_files([(tmp_path, f.filename)])
+
+        if not chunks:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No text could be extracted from '{f.filename}'. Make sure it is a text-based PDF, DOCX, or TXT — not a scanned image."
+            )
+
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -166,7 +174,6 @@ def upload_documents(workspace_id: int, files: List[UploadFile] = File(...), use
                 )
                 document_id = cur.fetchone()[0]
 
-        chunks = build_chunks_from_files([(tmp_path, f.filename)])
         store_chunks(chunks, document_id, workspace_id)
         results.append({"filename": f.filename, "document_id": document_id, "chunks": len(chunks)})
 
@@ -278,12 +285,12 @@ def chat(req: ChatRequest, user=Depends(get_current_user)):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO chat_messages (workspace_id, role, content) VALUES (%s, %s, %s)",
-                (req.workspace_id, "user", req.question)
+                "INSERT INTO chat_messages (workspace_id, role, content, citations) VALUES (%s, %s, %s, %s)",
+                (req.workspace_id, "user", req.question, json.dumps([]))
             )
             cur.execute(
-                "INSERT INTO chat_messages (workspace_id, role, content) VALUES (%s, %s, %s)",
-                (req.workspace_id, "assistant", answer)
+                "INSERT INTO chat_messages (workspace_id, role, content, citations) VALUES (%s, %s, %s, %s)",
+                (req.workspace_id, "assistant", answer, json.dumps(citations))
             )
 
     return {"answer": answer, "citations": citations}
@@ -294,11 +301,11 @@ def chat_history(workspace_id: int, user=Depends(get_current_user)):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT role, content, created_at FROM chat_messages WHERE workspace_id = %s ORDER BY created_at",
+                "SELECT role, content, created_at, citations FROM chat_messages WHERE workspace_id = %s ORDER BY created_at",
                 (workspace_id,)
             )
             rows = cur.fetchall()
-    return {"messages": [{"role": r[0], "content": r[1], "created_at": r[2]} for r in rows]}
+    return {"messages": [{"role": r[0], "content": r[1], "created_at": r[2], "citations": r[3] or []} for r in rows]}
 
 
 @app.post("/quiz/generate")
