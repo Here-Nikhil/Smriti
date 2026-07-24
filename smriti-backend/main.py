@@ -348,6 +348,39 @@ def quiz_grade(req: QuizGradeRequest, user=Depends(get_current_user)):
     raise HTTPException(status_code=400, detail="Provide either answer or selected_index")
 
 
+@app.get("/quiz/sessions")
+def list_quiz_sessions(workspace_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, mode, created_at,
+                       jsonb_array_length(questions::jsonb) as question_count
+                FROM quiz_sessions
+                WHERE workspace_id = %s
+                ORDER BY created_at DESC
+                """,
+                (workspace_id,)
+            )
+            rows = cur.fetchall()
+    return {"sessions": [{"id": r[0], "mode": r[1], "created_at": r[2], "question_count": r[3]} for r in rows]}
+
+
+@app.get("/quiz/sessions/{session_id}")
+def get_quiz_session(session_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, mode, questions, created_at FROM quiz_sessions WHERE id = %s",
+                (session_id,)
+            )
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    safe_questions = [{k: v for k, v in q.items() if k != "correct_index"} for q in row[2]]
+    return {"id": row[0], "mode": row[1], "questions": safe_questions, "created_at": row[3]}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
