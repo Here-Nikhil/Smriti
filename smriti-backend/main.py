@@ -342,7 +342,7 @@ def quiz_generate(req: QuizGenerateRequest, user=Depends(get_current_user)):
     if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
 
-    chunks = [c.text for c in chunks_objs]
+    chunks = chunks_objs
 
     if req.mode == "mcq":
         questions = generate_mcq_questions(client, LLM_MODEL, chunks, req.num_questions)
