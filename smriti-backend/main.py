@@ -379,7 +379,8 @@ def quiz_grade(req: QuizGradeRequest, user=Depends(get_current_user)):
     if req.selected_index is not None:
         return grade_mcq_answer(question, req.selected_index)
     if req.answer:
-        return grade_answer(client, LLM_MODEL, question["question"], question["source_text"], req.answer)
+        source_text = question.get("source_text", question.get("question", ""))
+        return grade_answer(client, LLM_MODEL, question["question"], source_text, req.answer)
     raise HTTPException(status_code=400, detail="Provide either answer or selected_index")
 
 
