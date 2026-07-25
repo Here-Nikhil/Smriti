@@ -261,29 +261,33 @@ def chat(req: ChatRequest, user=Depends(get_current_user)):
     history = [{"role": r[0], "content": r[1]} for r in reversed(rows)]
     history_text = "\n".join(f"{m['role']}: {m['content']}" for m in history)
 
-    rewrite_prompt = f"""Given this conversation history:
+    # Only rewrite if there is actual history
+    rewritten = req.question
+    if history:
+        rewrite_prompt = f"""Given this conversation history:
 {history_text}
 
 Rewrite this user question into a self-contained search query with no pronouns or references:
 "{req.question}"
 
 Reply with ONLY the rewritten query, nothing else."""
+        try:
+            rw = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": rewrite_prompt}],
+                temperature=0.0,
+                max_tokens=80,
+            )
+            rewritten = rw.choices[0].message.content.strip().strip('"')
+        except Exception:
+            pass
 
-    rewritten = req.question
-    try:
-        rw = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": rewrite_prompt}],
-            temperature=0.0,
-            max_tokens=80,
-        )
-        rewritten = rw.choices[0].message.content.strip().strip('"')
-    except Exception:
-        pass
-
+    # Search with rewritten query, fall back to original, then get all chunks
     results = search_chunks(rewritten, req.workspace_id)
     if not results:
         results = search_chunks(req.question, req.workspace_id)
+    if not results:
+        results = get_all_chunks(req.workspace_id)
     if not results:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
 
@@ -295,7 +299,9 @@ Reply with ONLY the rewritten query, nothing else."""
         "say you don't know. When you use information from a source, mention "
         "which source number it came from, like (Source 2)."
     )
-    user_prompt = f"Conversation so far:\n{history_text}\n\nDocument excerpts:\n{context}\n\nQuestion: {req.question}"
+    user_prompt = f"Document excerpts:\n{context}\n\nQuestion: {req.question}"
+    if history_text:
+        user_prompt = f"Conversation so far:\n{history_text}\n\n" + user_prompt
 
     response = client.chat.completions.create(
         model=LLM_MODEL,
@@ -539,8 +545,8 @@ def get_summaries(workspace_id: int, user=Depends(get_current_user)):
             )
             row = cur.fetchone()
     if not row:
-        return {"summary": None}
-    return {"summary": {"id": row[0], "content": row[1], "created_at": row[2]}}
+        return {"content": None}
+    return {"content": row[1]}
 
 
 @app.post("/transcribe")
