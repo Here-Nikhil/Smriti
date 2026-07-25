@@ -358,7 +358,7 @@ def quiz_generate(req: QuizGenerateRequest, user=Depends(get_current_user)):
             session_id = cur.fetchone()[0]
 
     safe_questions = [{k: v for k, v in q.items() if k != "correct_index"} for q in questions]
-    return {"session_id": session_id, "questions": safe_questions}
+    return {"session_id": session_id, "mode": req.mode, "questions": safe_questions}
 
 
 @app.post("/quiz/grade")
