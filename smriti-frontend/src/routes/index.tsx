@@ -749,7 +749,7 @@ function ChatPanel({ workspaceId, hasDocuments, messages, setMessages }: { works
     setRecording(false);
   };
 
-  if (!hasDocuments) return <EmptyState />;
+  // show banner instead of blocking chat when no documents
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -805,7 +805,8 @@ function ChatPanel({ workspaceId, hasDocuments, messages, setMessages }: { works
 
       <div className="border-t px-6 py-4" style={{ borderColor: "rgba(43,190,140,0.15)" }}>
         <div className="mx-auto flex max-w-3xl items-center gap-2">
-          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask something..."
+          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder={hasDocuments ? "Ask something..." : "Upload a document to continue..."}
+          disabled={!hasDocuments}
             className="flex-1 rounded-xl px-4 py-3 text-sm text-white placeholder:text-white/40 focus:outline-none" style={INPUT_STYLE}
             onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()} />
           <button onClick={recording ? stopRecording : startRecording} title={recording ? "Stop recording" : "Voice input"}
@@ -813,7 +814,7 @@ function ChatPanel({ workspaceId, hasDocuments, messages, setMessages }: { works
             style={{ background: recording ? "rgba(200,60,60,0.3)" : "rgba(43,190,140,0.12)", border: `1px solid ${recording ? "#ff6b6b" : "rgba(43,190,140,0.3)"}`, color: recording ? "#ff6b6b" : "#2bbe8c" }}>
             {recording ? <MicOff size={16} /> : <Mic size={16} />}
           </button>
-          <button onClick={send} disabled={sending || !input.trim()}
+          <button onClick={send} disabled={sending || !input.trim() || !hasDocuments}
             className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-black transition-all hover:brightness-110 disabled:opacity-50"
             style={{ background: "#2bbe8c", boxShadow: sending ? "0 0 20px rgba(43,190,140,0.4)" : "none", animation: sending ? "smriti-core 1.6s ease-in-out infinite" : "none" }}>
             <Send size={16} />
