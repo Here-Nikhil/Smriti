@@ -1006,6 +1006,16 @@ function SummaryPanel({ workspaceId, hasDocuments }: { workspaceId: number; hasD
 // Simple markdown renderer for headings and bullet lists
 function MarkdownContent({ content }: { content: string }) {
   const lines = content.split("\n");
+
+  const renderInline = (text: string) => {
+    const parts = text.split(/(\*\*[^*]+\*\*)/g);
+    return parts.map((part, i) =>
+      part.startsWith("**") && part.endsWith("**")
+        ? <strong key={i} className="font-semibold text-white">{part.slice(2, -2)}</strong>
+        : <span key={i}>{part}</span>
+    );
+  };
+
   return (
     <div className="space-y-2 text-sm text-white/85 leading-relaxed">
       {lines.map((line, i) => {
@@ -1015,12 +1025,11 @@ function MarkdownContent({ content }: { content: string }) {
         if (line.startsWith("- ") || line.startsWith("* ")) return (
           <div key={i} className="flex gap-2">
             <span style={{ color: "#2bbe8c" }}>•</span>
-            <span>{line.slice(2)}</span>
+            <span>{renderInline(line.slice(2))}</span>
           </div>
         );
-        if (line.startsWith("**") && line.endsWith("**")) return <p key={i} className="font-semibold text-white">{line.slice(2, -2)}</p>;
         if (line.trim() === "") return <div key={i} className="h-2" />;
-        return <p key={i}>{line}</p>;
+        return <p key={i}>{renderInline(line)}</p>;
       })}
     </div>
   );
