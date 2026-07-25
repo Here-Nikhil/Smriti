@@ -251,12 +251,6 @@ def clear_chat_history(workspace_id: int, user=Depends(get_current_user)):
 
 @app.post("/chat")
 def chat(req: ChatRequest, user=Depends(get_current_user)):
-    results = search_chunks(req.question, req.workspace_id)
-    if not results:
-        raise HTTPException(status_code=400, detail="No documents found in this workspace")
-
-    context, citations = format_context_with_citations(results)
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -266,6 +260,34 @@ def chat(req: ChatRequest, user=Depends(get_current_user)):
             rows = cur.fetchall()
     history = [{"role": r[0], "content": r[1]} for r in reversed(rows)]
     history_text = "\n".join(f"{m['role']}: {m['content']}" for m in history)
+
+    rewrite_prompt = f"""Given this conversation history:
+{history_text}
+
+Rewrite this user question into a self-contained search query with no pronouns or references:
+"{req.question}"
+
+Reply with ONLY the rewritten query, nothing else."""
+
+    rewritten = req.question
+    try:
+        rw = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": rewrite_prompt}],
+            temperature=0.0,
+            max_tokens=80,
+        )
+        rewritten = rw.choices[0].message.content.strip().strip('"')
+    except Exception:
+        pass
+
+    results = search_chunks(rewritten, req.workspace_id)
+    if not results:
+        results = search_chunks(req.question, req.workspace_id)
+    if not results:
+        raise HTTPException(status_code=400, detail="No documents found in this workspace")
+
+    context, citations = format_context_with_citations(results)
 
     system_prompt = (
         "You are a helpful assistant that answers questions using ONLY the "
