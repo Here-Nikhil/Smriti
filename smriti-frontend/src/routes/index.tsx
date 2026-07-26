@@ -1184,7 +1184,7 @@ function PrepPanel({ workspaceId, hasDocuments }: { workspaceId: number; hasDocu
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="w-full max-w-md rounded-2xl p-8 text-center backdrop-blur-xl" style={CARD_STYLE}>
           <h2 className="text-2xl font-bold text-white">Quiz complete</h2>
-          <p className="mt-4 text-5xl font-bold" style={{ color: "#2bbe8c" }}>{Math.round(totalScore * 100) / 100} / {quiz.questions.length}</p>
+          <p className="mt-4 text-5xl font-bold" style={{ color: "#2bbe8c" }}>{Math.round(totalScore * 100) / 100} / {quiz.questions.length * 10}</p>
           <PrimaryButton onClick={reset} className="mt-6 w-full">Try Again</PrimaryButton>
         </div>
       </div>
