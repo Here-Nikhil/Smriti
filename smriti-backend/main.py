@@ -91,6 +91,9 @@ class QuizGradeRequest(BaseModel):
     answer: Optional[str] = None
     selected_index: Optional[int] = None
 
+class QuizScoreRequest(BaseModel):
+    score: float
+
 class FlashcardGenerateRequest(BaseModel):
     workspace_id: int
 
@@ -261,7 +264,6 @@ def chat(req: ChatRequest, user=Depends(get_current_user)):
     history = [{"role": r[0], "content": r[1]} for r in reversed(rows)]
     history_text = "\n".join(f"{m['role']}: {m['content']}" for m in history)
 
-    # Only rewrite if there is actual history
     rewritten = req.question
     if history:
         rewrite_prompt = f"""Given this conversation history:
@@ -282,7 +284,6 @@ Reply with ONLY the rewritten query, nothing else."""
         except Exception:
             pass
 
-    # Search with rewritten query, fall back to original, then get all chunks
     results = search_chunks(rewritten, req.workspace_id)
     if not results:
         results = search_chunks(req.question, req.workspace_id)
@@ -384,6 +385,17 @@ def quiz_grade(req: QuizGradeRequest, user=Depends(get_current_user)):
     raise HTTPException(status_code=400, detail="Provide either answer or selected_index")
 
 
+@app.post("/quiz/sessions/{session_id}/score")
+def save_quiz_score(session_id: int, req: QuizScoreRequest, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE quiz_sessions SET score = %s WHERE id = %s",
+                (req.score, session_id)
+            )
+    return {"message": "Score saved"}
+
+
 @app.get("/quiz/sessions")
 def list_quiz_sessions(workspace_id: int, user=Depends(get_current_user)):
     with get_db_connection() as conn:
@@ -391,15 +403,17 @@ def list_quiz_sessions(workspace_id: int, user=Depends(get_current_user)):
             cur.execute(
                 """
                 SELECT id, mode, created_at,
-                       jsonb_array_length(questions::jsonb) as question_count
+                       jsonb_array_length(questions::jsonb) as question_count,
+                       score
                 FROM quiz_sessions
                 WHERE workspace_id = %s
                 ORDER BY created_at DESC
+                LIMIT 10
                 """,
                 (workspace_id,)
             )
             rows = cur.fetchall()
-    return {"sessions": [{"id": r[0], "mode": r[1], "created_at": r[2], "question_count": r[3]} for r in rows]}
+    return {"sessions": [{"id": r[0], "mode": r[1], "created_at": r[2], "question_count": r[3], "score": r[4]} for r in rows]}
 
 
 @app.get("/quiz/sessions/{session_id}")
