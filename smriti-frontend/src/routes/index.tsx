@@ -1039,7 +1039,46 @@ function MarkdownContent({ content }: { content: string }) {
 
 type QuizMode = "mcq" | "interactive";
 type QuizData = { session_id: number; mode: QuizMode; questions: { question: string; options?: string[]; correct_index?: number }[] };
-type QuizSession = { id: number; mode: string; created_at: string; question_count: number };
+type QuizSession = { id: number; mode: string; created_at: string; question_count: number; score?: number };
+
+function VoiceButton({ onTranscript }: { onTranscript: (text: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  const mediaRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  const start = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      chunksRef.current = [];
+      mr.ondataavailable = (e) => chunksRef.current.push(e.data);
+      mr.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const fd = new FormData();
+        fd.append("file", blob, "voice.webm");
+        try {
+          const data = await apiJson<{ text: string }>("/transcribe", { method: "POST", body: fd });
+          if (data.text) onTranscript(data.text);
+        } catch (err) { showError(err); }
+      };
+      mr.start();
+      mediaRef.current = mr;
+      setRecording(true);
+    } catch { showError(new Error("Microphone access denied")); }
+  };
+
+  const stop = () => { mediaRef.current?.stop(); mediaRef.current = null; setRecording(false); };
+
+  return (
+    <button onClick={recording ? stop : start} title={recording ? "Stop recording" : "Voice input"}
+      className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl transition-all hover:brightness-110"
+      style={{ background: recording ? "rgba(200,60,60,0.3)" : "rgba(43,190,140,0.12)", border: `1px solid ${recording ? "#ff6b6b" : "rgba(43,190,140,0.3)"}`, color: recording ? "#ff6b6b" : "#2bbe8c" }}>
+      {recording ? <MicOff size={16} /> : <Mic size={16} />}
+    </button>
+  );
+}
+
 
 function PrepPanel({ workspaceId, hasDocuments }: { workspaceId: number; hasDocuments: boolean }) {
   const [num, setNum] = useState(5);
@@ -1111,7 +1150,6 @@ function PrepPanel({ workspaceId, hasDocuments }: { workspaceId: number; hasDocu
     return (
       <div className="flex flex-1 flex-col overflow-y-auto px-6 py-6">
         <div className="mx-auto w-full max-w-md">
-          {/* Tab switcher */}
           <div className="flex rounded-xl p-1 mb-6" style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(43,190,140,0.15)" }}>
             {(["new", "history"] as const).map((t) => (
               <button key={t} onClick={() => setActiveTab(t)}
@@ -1165,6 +1203,7 @@ function PrepPanel({ workspaceId, hasDocuments }: { workspaceId: number; hasDocu
                         <p className="text-sm font-medium text-white capitalize">{s.mode === "mcq" ? "Multiple Choice" : "Open-ended"}</p>
                         <p className="text-xs text-white/50 flex items-center gap-1 mt-0.5">
                           <Clock size={10} /> {new Date(s.created_at).toLocaleDateString()} · {s.question_count} questions
+                          {s.score != null && <span style={{ color: "#2bbe8c" }}>· {Math.round(s.score)} / {s.question_count * 10}</span>}
                         </p>
                       </div>
                       <span className="text-xs px-2 py-1 rounded-full" style={{ background: "rgba(43,190,140,0.15)", color: "#2bbe8c", border: "1px solid rgba(43,190,140,0.3)" }}>Retake</span>
@@ -1180,11 +1219,16 @@ function PrepPanel({ workspaceId, hasDocuments }: { workspaceId: number; hasDocu
   }
 
   if (done) {
+    const maxScore = quiz.questions.length * 10;
+    if (quiz.session_id) {
+      apiJson(`/quiz/sessions/${quiz.session_id}/score`, { method: "POST", body: JSON.stringify({ score: totalScore }) }).catch(() => {});
+    }
     return (
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="w-full max-w-md rounded-2xl p-8 text-center backdrop-blur-xl" style={CARD_STYLE}>
           <h2 className="text-2xl font-bold text-white">Quiz complete</h2>
-          <p className="mt-4 text-5xl font-bold" style={{ color: "#2bbe8c" }}>{Math.round(totalScore * 100) / 100} / {quiz.questions.length * 10}</p>
+          <p className="mt-4 text-5xl font-bold" style={{ color: "#2bbe8c" }}>{Math.round(totalScore * 100) / 100} / {maxScore}</p>
+          <p className="mt-2 text-sm text-white/50">{Math.round((totalScore / maxScore) * 100)}% score</p>
           <PrimaryButton onClick={reset} className="mt-6 w-full">Try Again</PrimaryButton>
         </div>
       </div>
@@ -1220,9 +1264,12 @@ function PrepPanel({ workspaceId, hasDocuments }: { workspaceId: number; hasDocu
             <textarea value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Your answer..." rows={5} disabled={feedback !== null}
               className="w-full rounded-xl px-4 py-3 text-sm text-white placeholder:text-white/40 focus:outline-none" style={INPUT_STYLE} />
             {!feedback && (
-              <PrimaryButton onClick={() => grade({ workspace_id: workspaceId, session_id: quiz.session_id, question_index: idx, answer })} disabled={grading} className="mt-3">
-                {grading ? <span className="flex items-center gap-2"><Spinner /> Grading...</span> : "Submit Answer"}
-              </PrimaryButton>
+              <div className="mt-3 flex gap-2">
+                <PrimaryButton onClick={() => grade({ workspace_id: workspaceId, session_id: quiz.session_id, question_index: idx, answer })} disabled={grading} className="flex-1">
+                  {grading ? <span className="flex items-center gap-2"><Spinner /> Grading...</span> : "Submit Answer"}
+                </PrimaryButton>
+                <VoiceButton onTranscript={(text) => setAnswer((prev) => prev + (prev ? " " : "") + text)} />
+              </div>
             )}
           </div>
         )}
