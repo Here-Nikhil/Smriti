@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Lock,
@@ -52,9 +52,15 @@ function setUnauthCallback(cb: () => void) { _unauthCb = cb; }
 
 async function apiFetch(path: string, init: RequestInit = {}) {
   const isFormData = init.body instanceof FormData;
-  const headers: Record<string, string> = { Authorization: `Bearer ${getToken()}` };
+  const headers: Record<string, string> = {};
   if (!isFormData) headers["Content-Type"] = "application/json";
-  const res = await fetch(`${API}${path}`, { ...init, headers: { ...headers, ...(init.headers || {}) } });
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${API}${path}`, {
+    ...init,
+    headers: { ...headers, ...(init.headers || {}) },
+    credentials: "include",
+  });
   if (res.status === 401) {
     localStorage.removeItem("smriti_token");
     localStorage.removeItem("smriti_email");
@@ -287,16 +293,29 @@ function AuthScreen({ onAuthed }: { onAuthed: () => void }) {
     setLoading(true);
     try {
       if (mode === "signup") {
-        const res = await fetch(`${API}/register`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+        const res = await fetch(`${API}/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+          credentials: "include",
+        });
         if (!res.ok) throw new Error((await res.text()) || "Sign up failed");
+        const data = await res.json();
+        if (data.access_token) localStorage.setItem("smriti_token", data.access_token);
+        if (data.email) localStorage.setItem("smriti_email", data.email);
+        onAuthed();
+        return;
       }
-      const res = await fetch(`${API}/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+      const res = await fetch(`${API}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+        credentials: "include",
+      });
       if (!res.ok) throw new Error((await res.text()) || "Login failed");
       const data = await res.json();
-      const token = data.access_token || data.token || data.jwt;
-      if (!token) throw new Error("No token returned");
-      localStorage.setItem("smriti_token", token);
-      localStorage.setItem("smriti_email", email);
+      if (data.access_token) localStorage.setItem("smriti_token", data.access_token);
+      localStorage.setItem("smriti_email", data.email || email);
       onAuthed();
     } catch (err) {
       showError(err);
@@ -331,6 +350,23 @@ function AuthScreen({ onAuthed }: { onAuthed: () => void }) {
               {mode === "login" ? "Sign up" : "Log in"}
             </button>
           </p>
+          <div className="mt-4 flex items-center gap-3">
+            <div className="flex-1 h-px" style={{ background: "rgba(43,190,140,0.15)" }} />
+            <span className="text-xs text-white/40">or</span>
+            <div className="flex-1 h-px" style={{ background: "rgba(43,190,140,0.15)" }} />
+          </div>
+          <a href={`${API}/auth/google`}
+            className="mt-4 flex w-full items-center justify-center gap-3 rounded-xl py-3 px-4 text-sm font-semibold text-white transition-all hover:brightness-110"
+            style={{ background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.15)" }}>
+            <svg width="18" height="18" viewBox="0 0 48 48">
+              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+              <path fill="none" d="M0 0h48v48H0z"/>
+            </svg>
+            Continue with Google
+          </a>
         </form>
       </div>
     </div>
@@ -1435,6 +1471,17 @@ function Index() {
   const email = typeof window !== "undefined" ? localStorage.getItem("smriti_email") || "" : "";
 
   useEffect(() => {
+    // Handle OAuth redirect
+    const params = new URLSearchParams(window.location.search);
+    const oauthEmail = params.get("email");
+    if (oauthEmail && window.location.pathname === "/oauth-success") {
+      localStorage.setItem("smriti_email", oauthEmail);
+      window.history.replaceState({}, "", "/");
+      setAuthed(true);
+      setBooted(true);
+      setChecked(true);
+      return;
+    }
     const has = typeof window !== "undefined" && !!localStorage.getItem("smriti_token");
     setAuthed(has);
     setChecked(true);

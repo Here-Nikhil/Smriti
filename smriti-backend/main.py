@@ -6,15 +6,17 @@ from typing import List, Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from groq import Groq
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+import httpx
 
-from auth import hash_password, verify_password, create_token, decode_token, create_user, get_user_by_email
+from auth import hash_password, verify_password, create_token, decode_token, create_user, get_user_by_email, create_oauth_user
 from database import get_db_connection
 from rag_engine import build_chunks_from_files, format_context_with_citations, get_embedding_model, store_chunks, search_chunks, get_all_chunks
 from quiz_engine import generate_questions, grade_answer, generate_mcq_questions, grade_mcq_answer
@@ -31,7 +33,7 @@ def preload_embedding_model():
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 FAVICON_DATA_URI = (
     "data:image/svg+xml,"
@@ -48,11 +50,12 @@ async def custom_docs():
     return get_swagger_ui_html(openapi_url=app.openapi_url, title="Smriti API", swagger_favicon_url=FAVICON_DATA_URI)
 
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -61,13 +64,38 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 LLM_MODEL = "llama-3.3-70b-versatile"
 
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = "https://smriti-production.up.railway.app/auth/google/callback"
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+COOKIE_NAME = "smriti_token"
+COOKIE_MAX_AGE = 60 * 60 * 24 * 7  # 7 days
+
+
+def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    # Try cookie first, then Authorization header (for backwards compat)
+    token = request.cookies.get(COOKIE_NAME)
+    if not token and credentials:
+        token = credentials.credentials
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        payload = decode_token(credentials.credentials)
+        payload = decode_token(token)
         return {"user_id": payload["user_id"], "email": payload["email"]}
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+def set_auth_cookie(response: Response, token: str):
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=COOKIE_MAX_AGE,
+        path="/",
+    )
 
 
 class RegisterRequest(BaseModel):
@@ -111,24 +139,115 @@ class SummaryGenerateRequest(BaseModel):
 
 
 @app.post("/register")
-def register(req: RegisterRequest):
+def register(req: RegisterRequest, response: Response):
     with get_db_connection() as conn:
         existing = get_user_by_email(conn, req.email)
         if existing:
             raise HTTPException(status_code=400, detail="Email already registered")
         user = create_user(conn, req.email, req.password)
-    return {"message": "Account created", "user_id": user["id"]}
+    token = create_token(user["id"], user["email"])
+    set_auth_cookie(response, token)
+    return {"message": "Account created", "user_id": user["id"], "email": user["email"]}
 
 
 @app.post("/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, response: Response):
     with get_db_connection() as conn:
         user = get_user_by_email(conn, req.email)
     if not user or not verify_password(req.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     token = create_token(user["id"], user["email"])
-    return {"access_token": token, "token_type": "bearer"}
+    set_auth_cookie(response, token)
+    return {"access_token": token, "token_type": "bearer", "email": user["email"]}
 
+
+@app.post("/logout")
+def logout(response: Response):
+    response.delete_cookie(key=COOKIE_NAME, path="/", samesite="none", secure=True)
+    return {"message": "Logged out"}
+
+
+# ── Google OAuth ──────────────────────────────────────────────
+
+@app.get("/auth/google")
+def google_login():
+    params = (
+        f"client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
+        f"&response_type=code"
+        f"&scope=openid%20email%20profile"
+        f"&access_type=offline"
+    )
+    return RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{params}")
+
+
+@app.get("/auth/google/callback")
+async def google_callback(code: str, response: Response):
+    # Exchange code for tokens
+    async with httpx.AsyncClient() as hc:
+        token_res = await hc.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+        )
+    token_data = token_res.json()
+    if "error" in token_data:
+        raise HTTPException(status_code=400, detail=token_data.get("error_description", "OAuth error"))
+
+    # Get user info from Google
+    async with httpx.AsyncClient() as hc:
+        user_res = await hc.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {token_data['access_token']}"},
+        )
+    google_user = user_res.json()
+    email = google_user.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Could not get email from Google")
+
+    # Get or create user + auto-create default workspace
+    with get_db_connection() as conn:
+        user = create_oauth_user(conn, email)
+        # Create default workspace if user has none
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM workspace_members WHERE user_id = %s",
+                (user["id"],)
+            )
+            count = cur.fetchone()[0]
+            if count == 0:
+                cur.execute(
+                    "INSERT INTO workspaces (name, owner_id) VALUES (%s, %s) RETURNING id",
+                    ("My Workspace", user["id"])
+                )
+                ws_id = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (%s, %s, 'owner')",
+                    (ws_id, user["id"])
+                )
+
+    token = create_token(user["id"], email)
+
+    # Redirect to frontend with cookie set
+    redirect = RedirectResponse(url=f"{FRONTEND_URL}/oauth-success?email={email}")
+    redirect.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=COOKIE_MAX_AGE,
+        path="/",
+    )
+    return redirect
+
+
+# ─────────────────────────────────────────────────────────────
 
 @app.post("/workspaces")
 def create_workspace(req: WorkspaceCreateRequest, user=Depends(get_current_user)):
@@ -184,14 +303,12 @@ def rename_workspace(workspace_id: int, req: WorkspaceRenameRequest, user=Depend
 def delete_workspace(workspace_id: int, user=Depends(get_current_user)):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Only owner can delete
             cur.execute(
                 "SELECT 1 FROM workspace_members WHERE workspace_id = %s AND user_id = %s AND role = 'owner'",
                 (workspace_id, user["user_id"])
             )
             if not cur.fetchone():
                 raise HTTPException(status_code=403, detail="Only the owner can delete a workspace")
-            # Cascade delete everything
             cur.execute("DELETE FROM flashcards WHERE workspace_id = %s", (workspace_id,))
             cur.execute("DELETE FROM summaries WHERE workspace_id = %s", (workspace_id,))
             cur.execute("DELETE FROM quiz_sessions WHERE workspace_id = %s", (workspace_id,))
@@ -210,15 +327,9 @@ def upload_documents(workspace_id: int, files: List[UploadFile] = File(...), use
         tmp_path = os.path.join(tempfile.gettempdir(), f.filename)
         with open(tmp_path, "wb") as out:
             out.write(f.file.read())
-
         chunks = build_chunks_from_files([(tmp_path, f.filename)])
-
         if not chunks:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No text could be extracted from '{f.filename}'. Make sure it is a text-based PDF, DOCX, or TXT — not a scanned image."
-            )
-
+            raise HTTPException(status_code=400, detail=f"No text could be extracted from '{f.filename}'.")
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -226,10 +337,8 @@ def upload_documents(workspace_id: int, files: List[UploadFile] = File(...), use
                     (workspace_id, user["user_id"], f.filename)
                 )
                 document_id = cur.fetchone()[0]
-
         store_chunks(chunks, document_id, workspace_id)
         results.append({"filename": f.filename, "document_id": document_id, "chunks": len(chunks)})
-
     return {"uploaded": results}
 
 
@@ -255,14 +364,8 @@ def clear_documents(workspace_id: int, user=Depends(get_current_user)):
             )
             if not cur.fetchone():
                 raise HTTPException(status_code=403, detail="Access denied")
-            cur.execute(
-                "DELETE FROM document_chunks WHERE workspace_id = %s",
-                (workspace_id,)
-            )
-            cur.execute(
-                "DELETE FROM documents WHERE workspace_id = %s",
-                (workspace_id,)
-            )
+            cur.execute("DELETE FROM document_chunks WHERE workspace_id = %s", (workspace_id,))
+            cur.execute("DELETE FROM documents WHERE workspace_id = %s", (workspace_id,))
     return {"message": "All documents cleared"}
 
 
@@ -295,10 +398,7 @@ def clear_chat_history(workspace_id: int, user=Depends(get_current_user)):
             )
             if not cur.fetchone():
                 raise HTTPException(status_code=403, detail="Access denied")
-            cur.execute(
-                "DELETE FROM chat_messages WHERE workspace_id = %s",
-                (workspace_id,)
-            )
+            cur.execute("DELETE FROM chat_messages WHERE workspace_id = %s", (workspace_id,))
     return {"message": "Chat history cleared"}
 
 
@@ -343,7 +443,6 @@ Reply with ONLY the rewritten query, nothing else."""
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
 
     context, citations = format_context_with_citations(results)
-
     system_prompt = (
         "You are a helpful assistant that answers questions using ONLY the "
         "provided document excerpts. If the answer isn't in the excerpts, "
@@ -371,7 +470,6 @@ Reply with ONLY the rewritten query, nothing else."""
                 "INSERT INTO chat_messages (workspace_id, role, content, citations) VALUES (%s, %s, %s, %s)",
                 (req.workspace_id, "assistant", answer, json.dumps(citations))
             )
-
     return {"answer": answer, "citations": citations}
 
 
@@ -393,14 +491,10 @@ def quiz_generate(request: Request, req: QuizGenerateRequest, user=Depends(get_c
     chunks_objs = get_all_chunks(req.workspace_id)
     if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
-
-    chunks = chunks_objs
-
     if req.mode == "mcq":
-        questions = generate_mcq_questions(client, LLM_MODEL, chunks, req.num_questions)
+        questions = generate_mcq_questions(client, LLM_MODEL, chunks_objs, req.num_questions)
     else:
-        questions = generate_questions(client, LLM_MODEL, chunks, req.num_questions)
-
+        questions = generate_questions(client, LLM_MODEL, chunks_objs, req.num_questions)
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -408,7 +502,6 @@ def quiz_generate(request: Request, req: QuizGenerateRequest, user=Depends(get_c
                 (req.workspace_id, req.mode, json.dumps(questions))
             )
             session_id = cur.fetchone()[0]
-
     safe_questions = [{k: v for k, v in q.items() if k != "correct_index"} for q in questions]
     return {"session_id": session_id, "mode": req.mode, "questions": safe_questions}
 
@@ -424,10 +517,8 @@ def quiz_grade(req: QuizGradeRequest, user=Depends(get_current_user)):
             row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Quiz session not found")
-
     questions = row[0]
     question = questions[req.question_index]
-
     if req.selected_index is not None:
         return grade_mcq_answer(question, req.selected_index)
     if req.answer:
@@ -440,10 +531,7 @@ def quiz_grade(req: QuizGradeRequest, user=Depends(get_current_user)):
 def save_quiz_score(session_id: int, req: QuizScoreRequest, user=Depends(get_current_user)):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE quiz_sessions SET score = %s WHERE id = %s",
-                (req.score, session_id)
-            )
+            cur.execute("UPDATE quiz_sessions SET score = %s WHERE id = %s", (req.score, session_id))
     return {"message": "Score saved"}
 
 
@@ -493,10 +581,8 @@ def generate_flashcards(request: Request, req: FlashcardGenerateRequest, user=De
     chunks_objs = get_all_chunks(req.workspace_id)
     if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
-
     chunks = [c.text for c in chunks_objs]
     combined_text = "\n\n".join(chunks[:20])
-
     prompt = f"""You are a study assistant. Based on the following text, generate 10 flashcards.
 Each flashcard should have a concise question on the front and a clear answer on the back.
 Respond ONLY with a JSON array, no markdown, no preamble. Format:
@@ -504,33 +590,25 @@ Respond ONLY with a JSON array, no markdown, no preamble. Format:
 
 Text:
 {combined_text}"""
-
     response = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
     )
-
     raw = response.choices[0].message.content.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
-
     try:
         flashcards = json.loads(raw)
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to parse flashcards from LLM response")
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM flashcards WHERE workspace_id = %s",
-                (req.workspace_id,)
-            )
+            cur.execute("DELETE FROM flashcards WHERE workspace_id = %s", (req.workspace_id,))
             for card in flashcards:
                 cur.execute(
                     "INSERT INTO flashcards (workspace_id, front, back) VALUES (%s, %s, %s)",
                     (req.workspace_id, card["front"], card["back"])
                 )
-
     return {"flashcards": flashcards}
 
 
@@ -570,36 +648,27 @@ def generate_summary(request: Request, req: SummaryGenerateRequest, user=Depends
     chunks_objs = get_all_chunks(req.workspace_id)
     if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
-
     chunks = [c.text for c in chunks_objs]
     combined_text = "\n\n".join(chunks[:30])
-
     prompt = f"""You are a study assistant. Summarize the following document content into clear, concise bullet points grouped by topic. Make it easy to review before an exam.
 
 Text:
 {combined_text}
 
 Respond with a clean, well-structured summary. Use headings and bullet points."""
-
     response = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
     )
-
     summary_text = response.choices[0].message.content.strip()
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM summaries WHERE workspace_id = %s",
-                (req.workspace_id,)
-            )
+            cur.execute("DELETE FROM summaries WHERE workspace_id = %s", (req.workspace_id,))
             cur.execute(
                 "INSERT INTO summaries (workspace_id, content) VALUES (%s, %s) RETURNING id",
                 (req.workspace_id, summary_text)
             )
-
     return {"summary": summary_text}
 
 

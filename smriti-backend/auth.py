@@ -2,61 +2,52 @@ import os
 import bcrypt
 import jwt
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
+from database import get_db_connection
 
-load_dotenv()
+SECRET = os.environ.get("JWT_SECRET", "dev-secret")
+ALGORITHM = "HS256"
+TOKEN_EXPIRE_DAYS = 7
 
-JWT_SECRET = os.getenv("JWT_SECRET")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRY_HOURS = 24
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET is not set. Check your .env file.")
-
-
-def hash_password(plain_password: str) -> str:
-    return bcrypt.hashpw(plain_password.encode(), bcrypt.gensalt()).decode()
-
-
-def verify_password(plain_password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain_password.encode(), hashed.encode())
-
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
 
 def create_token(user_id: int, email: str) -> str:
     payload = {
         "user_id": user_id,
         "email": email,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS)
+        "exp": datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRE_DAYS),
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
+    return jwt.encode(payload, SECRET, algorithm=ALGORITHM)
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    return jwt.decode(token, SECRET, algorithms=[ALGORITHM])
 
-
-def create_user(conn, email: str, plain_password: str) -> dict:
-    hashed = hash_password(plain_password)
+def create_user(conn, email: str, password: str) -> dict:
     with conn.cursor() as cur:
         cur.execute(
-            """
-            INSERT INTO users (email, password_hash)
-            VALUES (%s, %s)
-            RETURNING id, email, created_at
-            """,
-            (email, hashed)
+            "INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id, email",
+            (email, hash_password(password))
         )
         row = cur.fetchone()
-        return {"id": row[0], "email": row[1], "created_at": row[2]}
+    return {"id": row[0], "email": row[1]}
 
-
-def get_user_by_email(conn, email: str) -> dict | None:
+def create_oauth_user(conn, email: str) -> dict:
+    """Create a user without a password (Google OAuth user)."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, email, password_hash FROM users WHERE email = %s",
-            (email,)
+            "INSERT INTO users (email, password_hash) VALUES (%s, %s) ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id, email",
+            (email, "")
         )
         row = cur.fetchone()
-        if not row:
-            return None
-        return {"id": row[0], "email": row[1], "password_hash": row[2]}
+    return {"id": row[0], "email": row[1]}
+
+def get_user_by_email(conn, email: str):
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, email, password_hash FROM users WHERE email = %s", (email,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "email": row[1], "password_hash": row[2]}
