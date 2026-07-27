@@ -6,17 +6,23 @@ from typing import List, Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from auth import hash_password, verify_password, create_token, decode_token, create_user, get_user_by_email
 from database import get_db_connection
 from rag_engine import build_chunks_from_files, format_context_with_citations, get_embedding_model, store_chunks, search_chunks, get_all_chunks
 from quiz_engine import generate_questions, grade_answer, generate_mcq_questions, grade_mcq_answer
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Smriti API", docs_url=None)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.on_event("startup")
 def preload_embedding_model():
@@ -73,6 +79,9 @@ class LoginRequest(BaseModel):
     password: str
 
 class WorkspaceCreateRequest(BaseModel):
+    name: str
+
+class WorkspaceRenameRequest(BaseModel):
     name: str
 
 class ChatRequest(BaseModel):
@@ -151,6 +160,47 @@ def list_workspaces(user=Depends(get_current_user)):
             )
             rows = cur.fetchall()
     return {"workspaces": [{"id": r[0], "name": r[1], "created_at": r[2]} for r in rows]}
+
+
+@app.patch("/workspaces/{workspace_id}")
+def rename_workspace(workspace_id: int, req: WorkspaceRenameRequest, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+                (workspace_id, user["user_id"])
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=403, detail="Access denied")
+            cur.execute(
+                "UPDATE workspaces SET name = %s WHERE id = %s RETURNING id, name, created_at",
+                (req.name.strip(), workspace_id)
+            )
+            row = cur.fetchone()
+    return {"id": row[0], "name": row[1], "created_at": row[2]}
+
+
+@app.delete("/workspaces/{workspace_id}")
+def delete_workspace(workspace_id: int, user=Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Only owner can delete
+            cur.execute(
+                "SELECT 1 FROM workspace_members WHERE workspace_id = %s AND user_id = %s AND role = 'owner'",
+                (workspace_id, user["user_id"])
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=403, detail="Only the owner can delete a workspace")
+            # Cascade delete everything
+            cur.execute("DELETE FROM flashcards WHERE workspace_id = %s", (workspace_id,))
+            cur.execute("DELETE FROM summaries WHERE workspace_id = %s", (workspace_id,))
+            cur.execute("DELETE FROM quiz_sessions WHERE workspace_id = %s", (workspace_id,))
+            cur.execute("DELETE FROM chat_messages WHERE workspace_id = %s", (workspace_id,))
+            cur.execute("DELETE FROM document_chunks WHERE workspace_id = %s", (workspace_id,))
+            cur.execute("DELETE FROM documents WHERE workspace_id = %s", (workspace_id,))
+            cur.execute("DELETE FROM workspace_members WHERE workspace_id = %s", (workspace_id,))
+            cur.execute("DELETE FROM workspaces WHERE id = %s", (workspace_id,))
+    return {"message": "Workspace deleted"}
 
 
 @app.post("/documents/upload")
@@ -338,7 +388,8 @@ def chat_history(workspace_id: int, user=Depends(get_current_user)):
 
 
 @app.post("/quiz/generate")
-def quiz_generate(req: QuizGenerateRequest, user=Depends(get_current_user)):
+@limiter.limit("10/minute")
+def quiz_generate(request: Request, req: QuizGenerateRequest, user=Depends(get_current_user)):
     chunks_objs = get_all_chunks(req.workspace_id)
     if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
@@ -437,7 +488,8 @@ def health():
 
 
 @app.post("/flashcards/generate")
-def generate_flashcards(req: FlashcardGenerateRequest, user=Depends(get_current_user)):
+@limiter.limit("15/minute")
+def generate_flashcards(request: Request, req: FlashcardGenerateRequest, user=Depends(get_current_user)):
     chunks_objs = get_all_chunks(req.workspace_id)
     if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")
@@ -513,7 +565,8 @@ def delete_flashcard(flashcard_id: int, user=Depends(get_current_user)):
 
 
 @app.post("/summaries/generate")
-def generate_summary(req: SummaryGenerateRequest, user=Depends(get_current_user)):
+@limiter.limit("15/minute")
+def generate_summary(request: Request, req: SummaryGenerateRequest, user=Depends(get_current_user)):
     chunks_objs = get_all_chunks(req.workspace_id)
     if not chunks_objs:
         raise HTTPException(status_code=400, detail="No documents found in this workspace")

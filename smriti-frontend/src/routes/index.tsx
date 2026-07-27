@@ -356,6 +356,11 @@ function WorkspaceView({ email, onLogout, onSelect }: { email: string; onLogout:
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -376,6 +381,40 @@ function WorkspaceView({ email, onLogout, onSelect }: { email: string; onLogout:
       setNewName(""); setShowModal(false); await load();
     } catch (err) { showError(err); }
     finally { setCreating(false); }
+  };
+
+  const startRename = (w: Workspace, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRenamingId(w.id);
+    setRenameValue(w.name);
+  };
+
+  const saveRename = async (id: number) => {
+    if (!renameValue.trim()) return;
+    setRenameSaving(true);
+    try {
+      await apiJson(`/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ name: renameValue.trim() }) });
+      setRenamingId(null);
+      await load();
+      toast.success("Workspace renamed", { style: { background: "#0a1a14", border: "1px solid #2bbe8c", color: "#fff" } });
+    } catch (err) { showError(err); }
+    finally { setRenameSaving(false); }
+  };
+
+  const confirmDelete = (id: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDeleteConfirmId(id);
+  };
+
+  const deleteWorkspace = async (id: number) => {
+    setDeletingId(id);
+    setDeleteConfirmId(null);
+    try {
+      await apiJson(`/workspaces/${id}`, { method: "DELETE" });
+      await load();
+      toast.success("Workspace deleted", { style: { background: "#0a1a14", border: "1px solid #2bbe8c", color: "#fff" } });
+    } catch (err) { showError(err); }
+    finally { setDeletingId(null); }
   };
 
   return (
@@ -402,15 +441,72 @@ function WorkspaceView({ email, onLogout, onSelect }: { email: string; onLogout:
         ) : (
           <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {workspaces.map((w) => (
-              <button key={w.id} onClick={() => onSelect(w)} className="group rounded-2xl p-5 text-left backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:shadow-lg" style={CARD_STYLE}>
-                <div className="flex items-center gap-3"><MiniBrain /><span className="truncate text-base font-semibold text-white">{w.name}</span></div>
-                {w.created_at && <p className="mt-3 text-xs text-white/40">Created {new Date(w.created_at).toLocaleDateString()}</p>}
-              </button>
+              <div key={w.id} className="group relative rounded-2xl p-5 text-left backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:shadow-lg" style={CARD_STYLE}>
+                {renamingId === w.id ? (
+                  /* ── Rename mode ── */
+                  <div onClick={(e) => e.stopPropagation()} className="flex flex-col gap-2">
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveRename(w.id); if (e.key === "Escape") setRenamingId(null); }}
+                      className="w-full rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none"
+                      style={INPUT_STYLE}
+                    />
+                    <div className="flex gap-2">
+                      <PrimaryButton onClick={() => saveRename(w.id)} disabled={renameSaving} className="flex-1 py-1 text-xs">
+                        {renameSaving ? "Saving..." : "Save"}
+                      </PrimaryButton>
+                      <button onClick={() => setRenamingId(null)} className="flex-1 rounded-lg py-1 text-xs text-white/70 hover:bg-white/5 transition-colors" style={{ border: "1px solid rgba(43,190,140,0.2)" }}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* ── Normal mode ── */
+                  <button className="w-full text-left" onClick={() => onSelect(w)}>
+                    <div className="flex items-center gap-3">
+                      <MiniBrain />
+                      <span className="truncate text-base font-semibold text-white">{w.name}</span>
+                    </div>
+                    {w.created_at && <p className="mt-3 text-xs text-white/40">Created {new Date(w.created_at).toLocaleDateString()}</p>}
+                  </button>
+                )}
+
+                {/* Action buttons — visible on hover, hidden during rename */}
+                {renamingId !== w.id && (
+                  <div className="absolute top-3 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {/* Rename */}
+                    <button
+                      onClick={(e) => startRename(w, e)}
+                      title="Rename"
+                      className="flex h-7 w-7 items-center justify-center rounded-lg transition-all hover:bg-white/10"
+                      style={{ border: "1px solid rgba(43,190,140,0.3)", color: "#2bbe8c" }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                      </svg>
+                    </button>
+                    {/* Delete */}
+                    <button
+                      onClick={(e) => confirmDelete(w.id, e)}
+                      title="Delete"
+                      disabled={deletingId === w.id}
+                      className="flex h-7 w-7 items-center justify-center rounded-lg transition-all hover:bg-red-900/20 disabled:opacity-40"
+                      style={{ border: "1px solid rgba(255,100,100,0.3)", color: "rgba(255,100,100,0.8)" }}
+                    >
+                      {deletingId === w.id ? <Spinner /> : <Trash2 size={12} />}
+                    </button>
+                  </div>
+                )}
+              </div>
             ))}
           </div>
         )}
       </main>
 
+      {/* Create workspace modal */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4" style={{ animation: "fadeIn 0.2s ease" }}>
           <div className="w-full max-w-sm rounded-2xl p-6 backdrop-blur-xl" style={CARD_STYLE}>
@@ -422,6 +518,31 @@ function WorkspaceView({ email, onLogout, onSelect }: { email: string; onLogout:
               className="mt-4 w-full rounded-xl px-4 py-3 text-sm text-white placeholder:text-white/40 focus:outline-none" style={INPUT_STYLE}
               onKeyDown={(e) => e.key === "Enter" && create()} />
             <PrimaryButton onClick={create} disabled={creating} className="mt-4 w-full">{creating ? "Creating..." : "Create"}</PrimaryButton>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirmation modal */}
+      {deleteConfirmId !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4" style={{ animation: "fadeIn 0.2s ease" }}>
+          <div className="w-full max-w-sm rounded-2xl p-6 backdrop-blur-xl" style={CARD_STYLE}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full" style={{ background: "rgba(255,100,100,0.1)", border: "1px solid rgba(255,100,100,0.3)" }}>
+                <Trash2 size={18} style={{ color: "rgba(255,100,100,0.8)" }} />
+              </div>
+              <h3 className="text-lg font-semibold text-white">Delete workspace?</h3>
+            </div>
+            <p className="text-sm text-white/60 mb-6">
+              This will permanently delete <span className="text-white font-medium">"{workspaces.find(w => w.id === deleteConfirmId)?.name}"</span> and all its documents, chat history, quizzes, and flashcards. This cannot be undone.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setDeleteConfirmId(null)} className="flex-1 rounded-xl py-2.5 text-sm text-white/80 transition-colors hover:bg-white/5" style={{ border: "1px solid rgba(43,190,140,0.25)" }}>Cancel</button>
+              <button onClick={() => deleteWorkspace(deleteConfirmId!)}
+                className="flex-1 rounded-xl py-2.5 text-sm font-semibold text-white transition-all hover:brightness-110"
+                style={{ background: "rgba(200,60,60,0.3)", border: "1px solid rgba(255,100,100,0.5)" }}>
+                Delete
+              </button>
+            </div>
           </div>
         </div>
       )}
